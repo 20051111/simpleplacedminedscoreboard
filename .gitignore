@@ -1,0 +1,19 @@
+# 运行期生成的文件（不要提交）
+config/
+*.log
+
+# 插件运行时在世界目录生成的数据包（由插件自己写，不属于源码）
+datapacks/sidebar_boards/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
