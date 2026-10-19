@@ -1,250 +1,175 @@
 # 简单放置破坏榜 (SimplePlacedMinedScoreboard)
 
-服务端 Sidebar 的 **破坏总和榜 + 放置总和榜**，一个 [MCDReforged](https://github.com/Fallen-Breath/MCDReforged) 单文件插件。
+MCDReforged 单文件插件：在 Minecraft 服务端侧边栏（sidebar）实时显示**八个统计榜单**，
+数值由数据包逐 tick 增量累加，**无需 RCON、不依赖客户端模组**。
 
-- **插件命令**：`!!spms`（旧命令 `!!dsb` 已不再注册）
-- **内部 id / 数据包命名空间**：`sidebar_boards`（保持不变，避免世界里的计分项与索引重来）
-- **依赖**：MCDReforged `>= 2.1.0`
-- **目标版本**：Minecraft 1.20.4（数据包模式内置 1.20.4 注册表；`stacked` 布局需要 1.20.3+）
-
----
+- 插件 id：`sidebar_boards`（内部 id 与数据包命名空间保持不变，升级不会重置世界里的计分项）
+- 命令：`!!spms`（旧命令 `!!dsb` 已不再注册）
+- 依赖：MCDReforged ≥ 2.1.0，Minecraft 1.20.x（数据包 `pack_format` 按 `minecraft_version` 配置自动选择）
+- 当前版本：**v1.5.0**
 
 ## 功能特性
 
-| | 说明 |
-|---|---|
-| 双榜同屏 | 侧边栏同时显示「破坏总和榜」和「放置总和榜」，各自上方一行「总破坏 / 总放置」合计 |
-| 真·实时 | 数据包模式由服务端**每 tick** 统计、排序、刷新，不依赖 RCON，也不必等统计文件落盘 |
-| 历史导入 | 首次启动只导入一次 `world/stats/*.json` 的历史累计值，不会从 0 开始 |
-| bot 过滤 | 默认排除所有以 `bot_` 开头的玩家名 |
-| 两种布局 | `stacked`（双榜同屏，默认） / `rotate`（两榜轮播） |
-| 千分位 | 可配置分隔符，由数据包函数宏在原版侧拼出 `1,234,567` |
-| 模组方块 | 提供 `datapack_registry_file` / `extra_blocks` / `extra_items` 配置项 |
+### 八个榜单，自由切换
 
----
+| 命令 | 榜单 | 统计口径（stats JSON 分类） |
+|---|---|---|
+| `!!spms break` | 破坏总和榜 | `minecraft:mined` 所有项求和 |
+| `!!spms place` | 放置总和榜 | `minecraft:used`（与 mined 取交集）求和 |
+| `!!spms both` | 放置/破坏同榜 | 两个独立排行榜上下堆叠在同一侧边栏，**不相加** |
+| `!!spms craft` | 合成榜 | `minecraft:crafted` 求和 |
+| `!!spms drop` | 丢弃榜 | `minecraft:dropped` 求和 |
+| `!!spms pick` | 拾荒榜 | `minecraft:picked_up` 求和 |
+| `!!spms kill` | 击杀榜 | `minecraft:killed` 按实体求和 |
+| `!!spms custom` | 综合榜 | `minecraft:custom` 全部杂项统计求和 |
+
+单榜格式统一为「全服总和行 + 排行榜」：名字列左对齐、数值走原版分数列右对齐。
+
+### 实时更新
+
+- 首次进入 datapack 模式时从 `world/stats/<uuid>.json` 导入每个玩家的历史总和；
+- 之后完全由数据包监听原版统计准则（`minecraft.mined:*` / `minecraft.used:*` /
+  `minecraft.crafted:*` / `minecraft.dropped:` / `minecraft.picked_up:` /
+  `minecraft.killed:<实体>` / `minecraft.custom:<统计项>`）逐 tick 累加，**不读 JSON、不走 RCON**；
+- 破坏/放置等常用分类逐 tick 消费；craft/drop/pick/kill/custom 准则项有几千项，
+  按 `extra_scan_interval_ticks`（默认 5 tick = 250ms）批量消费，侧边栏无感知。
+
+### 纯假人榜单
+
+`!!spms botboard on|off`：打开后**所有榜单只上榜 `bot_` 前缀的 carpet 假人**，
+方便给假人单独开榜/刷数据；关闭后恢复只上榜真人。
+
+> 注意：carpet 假人的统计大多集中在 `custom`（在线时长、行走距离等），mined/used 通常为 0，
+> 所以纯假人模式下看综合榜（`!!spms custom`）才有数据。
+
+### 其他命令
+
+| 命令 | 说明 |
+|---|---|
+| `!!spms` | 精简 help：榜单标题是**可点击按钮**（点击即切换，悬停显示统计项英文） |
+| `!!spms show` / `hide` | 显示 / 隐藏侧边栏（分数保留，随时再开） |
+| `!!spms status` | 榜单与运行状态（含假人开关状态） |
+| `!!spms debug` | 诊断路径 / 文件数 / 每人口径 |
+| `!!spms dp` | 数据包模式诊断（模式、pack_format、RCON、生成的文件） |
+| `!!spms dp rebuild` | 重建实时数据包（保留已累计分数） |
+| `!!spms refresh` | 立即重画 |
+
+切换榜单、`botboard`、`show/hide`、`dp rebuild` 需要权限等级 2。
 
 ## 安装
 
-1. 确认服务端已安装 [MCDReforged 2.1.0+](https://mcdreforged.com/)。
-2. 把 `simpleplacedminedscoreboard.py` 放进 MCDR 的 `plugins/` 目录：
+1. 把 `plugins/simpleplacedminedscoreboard-1.5.0.py` 放进 MCDR 的 `plugins/` 目录；
+2. 重启（或等 AutoPluginReloader 自动重载）；
+3. 进游戏执行 `!!spms` 查看 help，点按钮切换榜单。
 
-   ```
-   MCDReforged/
-   └── plugins/
-       └── simpleplacedminedscoreboard.py
-   ```
-
-3. 重载插件（或在控制台执行 `!!MCDR plugin load simpleplacedminedscoreboard`）。
-4. 插件首次加载会在 `config/simpleplacedminedscoreboard/config.json` 生成默认配置，`auto_show` 为 `true` 时会自动开榜。
-
-> **注意**：文件必须是 `.py` 单文件形式，不要改文件名里的内部 id。插件的 `PLUGIN_METADATA['id']` 是 `sidebar_boards`，改 id 会让 `config/`、数据包索引、计分项槽位全部重来，世界里的 `dsb_*` / `dsbm*` / `dsbu*` 计分项和历史分数会变成孤儿。
-
----
-
-## 命令
-
-游戏内或控制台输入 `!!spms`：
-
-| 命令 | 说明 | 权限 |
-|---|---|---|
-| `!!spms` | 帮助 | 无 |
-| `!!spms status` | 查看榜单与运行状态 | 无 |
-| `!!spms debug` | 诊断路径 / 文件数 / RCON / 每个玩家的口径 | 无 |
-| `!!spms dp` | 数据包模式诊断（模式、pack_format、生成的文件） | 无 |
-| `!!spms dp rebuild` | 重建实时数据包（保留已累计分数） | 等级 2 |
-| `!!spms show` | 显示侧边栏 | 等级 2 |
-| `!!spms hide` | 隐藏侧边栏（不删分数） | 等级 2 |
-| `!!spms refresh` | 立即重画 | 等级 2 |
-
----
-
-## 数据口径
-
-### 破坏总和榜
-
-```
-sum(minecraft:mined 的所有项)
-```
-
-与参考插件 StatsHelper 的 `#all` 求和逻辑一致。
-
-### 放置总和榜
-
-```
-目标集合 = 该玩家自己的 used.keys() ∩ mined.keys()
-初始值   = used 中这些目标项的计数总和
-实时值   = 初始值 + 逐 tick 按 used 新增数量继续累计
-```
-
-关键设计：快照保存的是**整份 `used`**，不只是交集内的项。所以某个方块从「不在交集」变成「在交集」时，它的上次值仍是真实历史值，增量为 0，**不会补计历史数量**；只有它真的又被放置了才会累加。
-
-如果玩家 JSON 里已有现成的「放置总和」字段，可用 `placed_precomputed_path` 指定（点号分隔的 JSON 路径），优先读它。
-
----
-
-## 两种实时方式
-
-### `realtime_mode = "datapack"`（默认）
-
-插件在 `<世界目录>/datapacks/sidebar_boards/` 生成一个数据包，用原版计分板准则项（`minecraft.mined:*` / `minecraft.used:*`）逐 tick 统计，并在函数里完成排序、合计、渲染。
-
-- **不需要 RCON**，也不需要周期性 `save-all`
-- 内置 Minecraft 1.20.4 完整方块/物品注册表（压缩存放，运行时无外部依赖）
-- 首次启动会 `save-all flush` 并等待 `Saved the game`，然后只导入一次历史值
-- 其他 MC 版本请配置 `datapack_registry_file` 提供完整注册表
-
-### `realtime_mode = "poll"`
-
-插件自己轮询 `world/stats/*.json`。原版统计只在保存时落盘，所以要「实时」就得周期性 `save-all`（`save_all_interval_seconds`，默认 20 秒）。延迟是分钟级到秒级，适合不想动数据包的场景。
-
----
-
-## 侧边栏是怎么画的
-
-原版**一个 display slot 只能挂一个计分项**，`sidebar.team.<color>` 只是「按队伍颜色区分可见性」，并不是把多个榜单叠起来。所以「同时显示两个榜单」的做法是：
-
-1. 建一个 `dummy` 计分项（`dsb_rank`）；
-2. 用**假玩家名**占行，`scoreboard players set` 控制名次顺序（分数越高越靠上）；
-3. 每一行显示的文本用 `scoreboard players display name` 写入 JSON 文本组件；
-4. `scoreboard objectives modify <obj> numberformat blank` 把分数列藏掉（需要 MC 1.20.3+）。
-
-在 1.20.4 中由数据包每 tick 汇总增量并用函数宏（`with storage`）更新双榜；`stats` JSON 仅首次导入历史值，不作为实时数据源。
-
-布局自上而下：
-
-```
-放置/破坏榜          <- 计分项标题
-总破坏  12,345,678
-破坏总和榜
-  #1 Alice  1,234
-  #2 Bob    1,100
-  ...
-总放置  9,876,543
-放置总和榜
-  #1 Alice  987
-  ...
-```
-
-侧边栏上限 15 行：合计行各 1 行 + 榜单标题各 1 行，所以每榜最多 `(15-4)//2 = 5` 行。
-
----
+插件会在世界目录下生成自己的数据包（`world/datapacks/sidebar_boards/`），
+世界里的 `dsb_*` 计分项由插件和数据包共同维护，请勿手动删除。
 
 ## 配置
 
-首次运行自动生成 `config/simpleplacedminedscoreboard/config.json`：
+首次运行后生成 `config/sidebar_boards/config.json`，常用项：
 
-### 服务端 / 世界路径
-
-| 键 | 默认 | 说明 |
+| 配置 | 默认 | 说明 |
 |---|---|---|
-| `server_path` | `""` | 留空 = 用 MCDR 的 `working_directory` |
-| `world_folder` | `""` | 留空 = 自动从 `server.properties` 的 `level-name` 读 |
+| `realtime_mode` | `datapack` | `datapack`（推荐，逐 tick 实时）或 `poll`（插件轮询 JSON） |
+| `active_board` | `break` | 启动时显示的榜单 |
+| `board_top_n` | `10` | 单榜排行榜条数（≤14） |
+| `both_top_n` | `6` | 同榜每边条数（2 个总和行 + 2×N ≤ 15，最多 6） |
+| `show_blank_row` | `false` | 总和行与排行榜之间是否留空行 |
+| `thousands_separator` | `""` | 千分位分隔符（`,` / `.` / 空格 / 空） |
+| `sidebar_visible` | `true` | 启动是否直接显示侧边栏 |
+| `bot_only_mode` | `false` | 纯假人榜单（等价 `!!spms botboard on`） |
+| `bot_name_prefixes` | `["bot_"]` | 假人名字前缀 |
+| `extra_scan_interval_ticks` | `5` | 新分类批量消费间隔（tick） |
+| `minecraft_version` | `1.20.4` | 决定数据包 `pack_format` |
+| `server_path` | `""` | 服务端目录（留空 = MCDR 工作目录） |
+| 标题/标签 | 见配置 | `break_title` / `place_title` / `both_title` / `craft_title` / `drop_title` / `pick_title` / `kill_title` / `custom_title` 与对应 `total_*_label` |
 
-### 逐 tick 刷新
+改配置后插件会自动重建数据包；也可以 `!!spms dp rebuild` 手动重建。
 
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `tick_interval_ms` | `50` | 一次「tick」的间隔，50ms ≈ 原版 20 TPS |
-| `scan_interval_ticks` | `1` | 每多少 tick 扫一次文件 mtime |
-| `save_all_interval_seconds` | `20` | 主动 `save-all` 间隔；`0` = 不主动保存（延迟变分钟级） |
+## 侧边栏怎么画的
 
-### 实时方式
+原版一个 display slot 只能挂一个计分项，team 槽位只是「按队伍颜色区分可见性」，
+并不能把多个榜单叠起来。所以本插件：
 
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `realtime_mode` | `"datapack"` | `datapack`（服务端逐 tick） / `poll`（读统计文件） |
-| `minecraft_version` | `"1.20.4"` | 无法从服务端取到版本时用它 |
-| `datapack_registry_file` | `""` | 可选：包含 block/item 的完整注册表 JSON，支持模组方块 |
-| `datapack_extra_blocks` | `[]` | 额外方块 ID，如 `["mymod:ruby_block"]` |
-| `datapack_extra_items` | `[]` | 额外物品 ID |
-| `datapack_dir` | `""` | 留空 = `<世界目录>/datapacks` |
-| `datapack_pack_format` | `0` | `0` = 自动推断 |
-| `datapack_exclude_items` | `[]` | 排除某些统计键（跨版本降级 / 移除模组后旧方块 ID 会让准则项建失败） |
+- 每个榜各建一个 dummy 计分项（`dsb_rank_brk` / `dsb_rank_plc` / `dsb_rank_cft` …）作为展示项；
+- 用假玩家名占行（`dsb_br01`…`dsb_br15`），靠 `scoreboard players display name`
+  写入「名次 + 名字」；
+- 数值直接当占位行的分数：原版侧边栏名字列左对齐、分数列右对齐，排序也由分数决定
+  （同分按占位行名字升序，占位行按名次零填充命名，正好维持名次顺序）；
+- 同榜（both）用名次分排序、数值写进显示名（`numberformat blank` 隐藏分数列）。
 
-### 榜单显示
+## 数据口径
 
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `sidebar_layout` | `"stacked"` | `stacked`（双榜同屏） / `rotate`（轮播） |
-| `board_top_n` | `6` | 每个榜显示前几名（stacked 下 `2 + 2*N` 需 ≤ 15） |
-| `rotate_interval_seconds` | `10` | 仅 `rotate` 布局的轮播间隔 |
-| `hide_number_column` | `true` | `stacked` 布局隐藏分数列（需 1.20.3+） |
-| `sidebar_title` | `"放置/破坏榜"` | 侧边栏最上方的计分项标题 |
-| `break_title` | `"破坏总和榜"` | |
-| `place_title` | `"放置总和榜"` | |
-| `show_rank_number` | `true` | 行内是否带 `#1 #2` 名次 |
-| `show_total_row` | `true` | 是否显示「总破坏 / 总放置」两行 |
-| `total_break_label` | `"总破坏"` | |
-| `total_place_label` | `"总放置"` | |
-| `thousands_separator` | `""` | 千分位分隔符；`","` = 恢复逗号，也支持 `" "` / `"."` |
-| `title_color` | `"gold"` | 标题颜色 |
-| `name_color` | `"white"` | 玩家名颜色 |
-| `value_color` | `"aqua"` | 数值颜色 |
+- 破坏榜 = `sum(minecraft:mined)`（沿用 StatsHelper 的 `#all` 求和逻辑）；
+- 放置榜 = 玩家各自 `used.keys() ∩ mined.keys()` 内的 used 计数总和，
+  逐 tick 按 used 新增继续累计（首次从 JSON 导入初始值）；
+- 其余分类榜 = 对应分类所有项求和；
+- `bot_` 前缀玩家默认排除，`bot_only_mode` 打开后反过来只保留假人；
+- 玩家名映射来自 `usercache.json` + 插件自己的 `uuid.json`（逻辑同 StatsHelper）。
 
-### 玩家过滤
+## 版本历史
 
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `bot_name_prefixes` | `["bot_"]` | 排除这些前缀的玩家名 |
-| `bot_name_patterns` | `[]` | 额外的正则黑名单（完整匹配，忽略大小写） |
+- **v1.5.0**：新增合成/丢弃/拾荒/击杀/综合五榜（原版统计分类全覆盖）；去掉总榜；
+  新增纯假人榜单（`!!spms botboard`）；help 改为可点击按钮；
+  新分类按 `extra_scan_interval_ticks` 批量消费；修复纯假人模式下假人被过滤、
+  长假人名导致 tick 崩溃等问题。
+- **v1.4.0**：破坏/放置/总榜/同榜四榜自由切换；同榜堆叠复刻；名字左对齐数值右对齐。
+- **v1.3.x**：更早的 stacked 同榜版本。
 
-> 这里**刻意不使用**参考插件 `isBot()` 里「名字长度 <4 或 >16 也算 bot」的启发式——那条规则会把 `Bob` / `Ann` 这种正常短名误判掉。
+## 致谢
 
-### 其他
-
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `auto_show` | `true` | 插件加载后自动开榜 |
-| `refresh_uuid_interval_seconds` | `30` | uuid/玩家名映射的重扫间隔 |
-| `placed_precomputed_path` | `""` | 现成的 placed 总和字段的 JSON 路径 |
-| `debug_log` | `false` | 详细日志 |
+玩家名/UUID 映射与统计读取逻辑参考 StatsHelper 的实现。
 
 ---
 
-## 常见问题
+# 仓库审计日志 (WarehouseAuditLog)
 
-**侧边栏没出现？**
-`!!spms debug` 看统计目录是否存在、识别到多少玩家；`!!spms dp` 看数据包是否加载。MCDR 是先加载插件再启动服务端，插件会等服务端就绪后自动补建（最多等 30 分钟）。
+MCDReforged 单文件插件：监控指定坐标范围内**仓库容器（箱子/陷阱箱/木桶/17 种潜影盒）的取出行为**，
+记录到 SQLite 并以 CSV 导出，全程只读 RCON 轮询 + 异步队列写入，**不卡服**。
 
-**用了模组方块，榜单数字不动？**
-准则项建失败通常是因为注册表里没有那个方块。提供 `datapack_registry_file`（完整注册表 JSON），或把 ID 填进 `datapack_extra_blocks` / `datapack_extra_items`，然后 `!!spms dp rebuild`。
+- 插件 id：`warehouse_audit`
+- 命令：`!!wh`（`!!wh help` 查看全部）
+- 依赖：MCDReforged ≥ 2.1.0，Minecraft 1.13~1.20.4 实测（1.20.5+ 自适应），需启用 RCON
+- 当前版本：**v1.0.0**
+- 源码与详细文档：[20051111/mcdr-warehouse-audit](https://github.com/20051111/mcdr-warehouse-audit)
 
-**数值和游戏内 `stat` 不一致？**
-数据包模式下实时值由服务端计分板持有，用 `/scoreboard players get <玩家> dsb_brk` / `dsb_plc` 核对。`!!spms status` 里显示的是本地磁盘快照，仅作参考。
+## 功能特性
 
-**想改回单榜轮播？**
-`sidebar_layout` 改成 `"rotate"`，重载插件。
+- **只记取出**：默认存入不记录、不记玩家 ID、不记维度、不记槽位（均可配置）
+- **自动合并**：1 秒内同容器同物品的多次取出合并为一条、数量相加
+- **内容物读取**：取出潜影盒/箱子物品时读取其内嵌 NBT，如 `packed_ice x640; chest x64`
+- **容器自动发现**：区域 ≤2 万方块用 RCON 扫描，超出回退区域文件解析
+- **数据安全**：服务端崩溃/关闭时合并缓冲立即写出、恢复后重新基线（回档不产生幽灵记录）；
+  优雅退出排空队列，强杀最多丢约 0.5 秒未写记录
+
+## 常用命令
+
+| 命令 | 权限 | 说明 |
+| --- | --- | --- |
+| `!!wh recent [N]` | 所有人 | 查看最近 N 条记录（默认 10，最新在上） |
+| `!!wh status` / `list` | 所有人 | 运行状态 / 已知容器列表 |
+| `!!wh export [选项]` | helper+ | 导出 CSV（带统计时间跨度、服务端版本备注行） |
+| `!!wh region set <名称> <维度> <x1> <y1> <z1> <x2> <y2> <z2>` | helper+ | 游戏内配置监控范围，立即生效 |
+| `!!wh rescan` / `on` / `off` | helper+ | 重新枚举 / 恢复 / 暂停轮询 |
+
+CSV 默认列：`时间, X, Y, Z, 容器类型, 物品ID, 变化量, 变化前, 变化后, 方向, 内容物`
+
+## 安装
+
+1. 把 `plugins/warehouse_audit-1.0.0.py` 放进 MCDR 的 `plugins/` 目录；
+2. 确保服务端 RCON 已启用（`config.yml` 中 `rcon.enable: true`）；
+3. 重启 MCDR 或等 AutoPluginReloader 自动重载；
+4. 用 `!!wh region set ...` 配置区域（或编辑 `config/warehouse_audit/warehouse_audit.json`）。
+
+## 版本历史
+
+- **v1.0.0**：首个版本。只记取出/不记玩家ID/不记维度/不记槽位；1 秒合并；
+  内容物读取；区域指令；崩溃/回档数据安全；92 项单元测试。
 
 ---
 
-## 文件说明
+## 相关仓库
 
-```
-simpleplacedminedscoreboard.py   插件本体（单文件，MCDR 直接加载）
-README.md                        本文档
-LICENSE                          MIT
-```
-
-插件会在世界目录下生成数据包：
-
-```
-<世界目录>/datapacks/sidebar_boards/
-├── pack.mcmeta
-└── data/
-    ├── minecraft/tags/function/{load,tick}.json
-    └── sidebar_boards/functions/
-        ├── load.mcfunction / tick.mcfunction / update.mcfunction
-        ├── new_player.mcfunction
-        ├── event/m{slot}.mcfunction / event/u{slot}.mcfunction
-        ├── seed/<slug>.mcfunction
-        ├── fmt/*.mcfunction
-        └── render/*.mcfunction
-```
-
-以及运行期索引 `config/simpleplacedminedscoreboard/datapack_index.json`（方块 ID → 槽位，保证重载后槽位稳定）。
-
----
-
-## 许可
-
-[MIT](LICENSE)
+- 本仓库：源码与发布
+- [20051111/MCDRplugin](https://github.com/20051111/MCDRplugin)：插件合集（分发文件）
