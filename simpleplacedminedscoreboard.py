@@ -1229,6 +1229,7 @@ def dp_write_functions(info_map: Dict[str, Dict[str, Set[str]]], needed: Set[str
     init.append('execute unless score #xcd dsb_ctl matches 0..{} run scoreboard players set #xcd dsb_ctl {}'.format(
         extra_interval - 1, extra_interval - 1))
     # 隐藏状态（sidebar_visible=false 或 !!spms hide）时不画、不占 display slot
+    # render.mcfunction 内含去抖 gate + snapshot，init 直接调它即可
     init.append('execute if score #visible dsb_ctl matches 1 run function {}:render'.format(DP_NAME))
     init.append('execute if score #visible dsb_ctl matches 1 run scoreboard objectives setdisplay sidebar {}'.format(active['display']))
     init.append('scoreboard players set #ready dsb_ctl {}'.format(DP_SCHEMA))
@@ -1383,6 +1384,11 @@ def _dp_write_both_board(spec: Dict[str, Any], names: List[str], limit: int):
     这里数值写进显示名（最老版本的做法），用「名次分」控制顺序：
         破坏总和行 2N+2，破坏 #r = 2N+2-r；放置总和行 N+1，放置 #r = N+1-r
     分数列对同榜是 blank（否则会露出名次分）。
+
+    防闪烁：不再开头无条件 reset 全部占位行（那是客户端闪烁的根源）。
+    选中某玩家时比较「该行当前 owner + dsb_value」与「该玩家当前分数」：
+        相同 -> 整行跳过（零发包）；不同 -> 才写显示名/名次分/owner/value。
+    名次无人入选时才 reset 那一行（掉榜，发一次包）。
     """
     disp = spec['display']
     grouped = bool(_dp_grouping())
@@ -1395,9 +1401,6 @@ def _dp_write_both_board(spec: Dict[str, Any], names: List[str], limit: int):
                 'data modify storage {}:render {} set from storage {}:fmt out'.format(DP_NAME, target, DP_NAME)]
 
     render = []
-    for holder in _board_all_holders(spec):
-        render.append('scoreboard players reset {} {}'.format(holder, disp))
-
     for sub_index, sub in enumerate(spec['subs']):
         tag = sub['tag']
         objective = sub['objective']
@@ -1405,11 +1408,11 @@ def _dp_write_both_board(spec: Dict[str, Any], names: List[str], limit: int):
         row_prefix = sub['row_prefix']
         total_holder = sub['total_holder']
         base = (2 * limit + 2) if sub_index == 0 else (limit + 1)   # 该分榜总和行的名次分
-        # 全服合计
+        # 全服合计（#total 是假玩家，虽也发包但客户端不渲染，可无条件算）
         render.append('scoreboard players set #total {} 0'.format(total_obj))
         for name in names:
             render.append('scoreboard players operation #total {} += {} {}'.format(total_obj, name, objective))
-        # 排名
+        # 排名：把每个玩家的分数复制到 dsb_work，再逐名次取最大
         for name in names:
             render.append('scoreboard players operation {} dsb_work = {} {}'.format(name, name, objective))
         for rank in range(1, limit + 1):
@@ -1423,14 +1426,23 @@ def _dp_write_both_board(spec: Dict[str, Any], names: List[str], limit: int):
                 render.append('execute if score #best dsb_work matches {}.. if score #picked dsb_ctl matches 0 '
                               'if score {} dsb_work = #best dsb_work run function {}:{}'.format(
                                   SCORE_MIN + 1, name, DP_NAME, rel))
+                # 同榜数值在显示名里 -> 用 dsb_value 记录"该行当前数值"做比较
                 chosen = ['scoreboard players set #picked dsb_ctl 1',
                           'scoreboard players set {} dsb_work {}'.format(name, SCORE_MIN),
-                          # ⚠ ensure_ascii=False：Brigadier 的 NBT 字符串不接受 \uXXXX 转义
-                          'data modify storage {}:render row set value {}'.format(
-                              DP_NAME, json.dumps({'name': name}, ensure_ascii=False, separators=(',', ':')))]
-                chosen += value_lines('{} {}'.format(name, objective), 'row.value')
-                chosen.append('function {}:render/row_d_{}{} with storage {}:render row'.format(DP_NAME, tag, rank, DP_NAME))
+                          'scoreboard players set #rowchg dsb_ctl 0',
+                          'execute unless score {} dsb_owner matches {} run scoreboard players set #rowchg dsb_ctl 1'.format(holder, player_id),
+                          'execute unless score {} dsb_value = {} {} run scoreboard players set #rowchg dsb_ctl 1'.format(holder, name, objective)]
+                guard = 'execute if score #rowchg dsb_ctl matches 1 run '
+                chosen.append(guard + 'data modify storage {}:render row set value {}'.format(
+                    DP_NAME, json.dumps({'name': name}, ensure_ascii=False, separators=(',', ':'))))
+                chosen += [guard + line for line in value_lines('{} {}'.format(name, objective), 'row.value')]
+                chosen.append(guard + 'function {}:render/row_d_{}{} with storage {}:render row'.format(DP_NAME, tag, rank, DP_NAME))
+                chosen.append(guard + 'scoreboard players set {} dsb_owner {}'.format(holder, player_id))
+                chosen.append(guard + 'scoreboard players operation {} dsb_value = {} {}'.format(holder, name, objective))
                 dp_write_file(rel + '.mcfunction', '\n'.join(chosen) + '\n')
+            # 该名次无人入选：占位行有残留分数则清掉（行消失）
+            render.append('execute if score #picked dsb_ctl matches 0 if score {} {} matches {}.. '
+                          'run scoreboard players reset {} {}'.format(holder, disp, SCORE_MIN, holder, disp))
             extra = []
             if cfg('show_rank_number'):
                 extra.append({'text': '#{} '.format(rank), 'color': RANK_COLORS[min(rank - 1, len(RANK_COLORS) - 1)]})
@@ -1439,12 +1451,16 @@ def _dp_write_both_board(spec: Dict[str, Any], names: List[str], limit: int):
             row = ['scoreboard players set {} {} {}'.format(holder, disp, base - rank),
                    '$scoreboard players display name {} {} {}'.format(holder, disp, _json_component({'text': '', 'extra': extra}))]
             dp_write_file('render/row_d_{}{}.mcfunction'.format(tag, rank), '\n'.join(row) + '\n')
-        # 总和行：label + 全服合计（数值同样在显示名里）
+        # 总和行：storage 写入不产生客户端包，可无条件；名次分/显示名按值比较
         render.append('data modify storage {}:render total set value {}'.format(
             DP_NAME, json.dumps({'label': str(sub['total_label'])}, ensure_ascii=False, separators=(',', ':'))))
         render += value_lines('#total {}'.format(total_obj), 'total.value')
-        render.append('scoreboard players set {} {} {}'.format(total_holder, disp, base))
-        render.append('function {}:render/row_d_total_{} with storage {}:render total'.format(DP_NAME, tag, DP_NAME))
+        render.append('execute unless score {} dsb_value = #total {} run scoreboard players set {} {} {}'.format(
+            total_holder, total_obj, total_holder, disp, base))
+        render.append('execute unless score {} dsb_value = #total {} run function {}:render/row_d_total_{} with storage {}:render total'.format(
+            total_holder, total_obj, DP_NAME, tag, DP_NAME))
+        render.append('execute unless score {} dsb_value = #total {} run scoreboard players operation {} dsb_value = #total {}'.format(
+            total_holder, total_obj, total_holder, total_obj))
         row_total = ['$scoreboard players display name {} {} {}'.format(total_holder, disp, _json_component({'text': '', 'extra': [
             {'text': '$(label) ', 'color': cfg('title_color')},
             {'text': '$(value)', 'color': cfg('value_color')}]}))]
@@ -1454,12 +1470,22 @@ def _dp_write_both_board(spec: Dict[str, Any], names: List[str], limit: int):
 
 def _dp_write_boards(names: List[str], limit: int, both_limit: int):
     """
-    生成三个榜的渲染函数与 render 分发。
+    生成各榜的渲染函数与 render 分发。
 
     每个榜的侧边栏格式（自上而下）：
         全服总和行（label + 数值） -> 换行（空行） -> 排行榜（#名次 玩家 数值）
     侧边栏标题 = 该榜计分项的 displayname（破坏总和榜 / 放置总和榜 / 总榜）。
     render.mcfunction 只渲染 #board 指向的当前榜；切换榜单由插件写 #board + setdisplay。
+
+    防闪烁（行级 diff，无快照）：
+        * 不再开头无条件 reset 全部占位行 —— 那是客户端"行消失再重建"闪烁的根源
+        * 选中某玩家进某名次时，比较「占位行当前 owner + 分数」与「该玩家当前分数」：
+              相同 -> #rowchg=0 -> 整行跳过，一个包都不发（侧边栏无感）
+              不同 -> 才写分数/显示名/owner（当帧更新）
+        比较式左边是上一帧的占位行、右边是玩家**当前**分数，
+        所以加分/掉分当帧就能发现（不存在"等渲染后才更新"的死循环）。
+        * 名次无人入选时才 reset 那一行（掉榜，发一次包）
+        * 总和行/空行同样按值比较，没变就不发
     """
     specs = _board_specs()
     total_on = bool(cfg('show_total_row'))
@@ -1483,11 +1509,8 @@ def _dp_write_boards(names: List[str], limit: int, both_limit: int):
         total_holder = prefix + 't'
         blank_holder = prefix + 'x'
         render = []
-        # 先清空本榜全部占位行，再把当前前 N 名写回去（玩家变少时不会留旧行）
-        for holder in _board_holders(prefix, limit):
-            render.append('scoreboard players reset {} {}'.format(holder, disp))
         if total_on:
-            # 全服合计 = 所有候选玩家分数之和，每次重画时重新算
+            # 全服合计 = 所有候选玩家分数之和（假玩家运算，客户端不渲染）
             render.append('scoreboard players set #total {} 0'.format(total_obj))
             for name in names:
                 render.append('scoreboard players operation #total {} += {} {}'.format(total_obj, name, objective))
@@ -1506,19 +1529,26 @@ def _dp_write_boards(names: List[str], limit: int, both_limit: int):
                 render.append('execute if score #best dsb_work matches {}.. if score #picked dsb_ctl matches 0 '
                               'if score {} dsb_work = #best dsb_work run function {}:{}'.format(
                                   SCORE_MIN + 1, name, DP_NAME, rel))
+                # 数值写进占位行的【分数】：原版侧边栏名字列左对齐、分数列右对齐，
+                # 同分时按占位行名字（dsb_*r01..r13 零填充）升序，正好维持名次顺序。
                 chosen = ['scoreboard players set #picked dsb_ctl 1',
                           'scoreboard players set {} dsb_work {}'.format(name, SCORE_MIN),
-                          # 数值写进占位行的【分数】：原版侧边栏名字列左对齐、分数列右对齐，
-                          # 同分时按占位行名字（dsb_*r01..r13 零填充）升序，正好维持名次顺序。
-                          'scoreboard players operation {} {} = {} {}'.format(holder, disp, name, objective),
-                          # ⚠ ensure_ascii=False：Brigadier 的 NBT 字符串不接受 \uXXXX 转义，
-                          #   JSON 组件（display name）才接受。玩家名虽是 ASCII，统一按字面输出。
-                          'data modify storage {}:render row set value {}'.format(
-                              DP_NAME, json.dumps({'name': name}, ensure_ascii=False, separators=(',', ':')))]
-                chosen += ['function {}:render/row_{}{} with storage {}:render row'.format(DP_NAME, kind, rank, DP_NAME),
-                           'scoreboard players set {} dsb_owner {}'.format(holder, player_id),
-                           'scoreboard players operation {} dsb_value = {} {}'.format(holder, name, objective)]
+                          'scoreboard players set #rowchg dsb_ctl 0',
+                          'execute unless score {} dsb_owner matches {} run scoreboard players set #rowchg dsb_ctl 1'.format(holder, player_id),
+                          'execute unless score {} {} = {} {} run scoreboard players set #rowchg dsb_ctl 1'.format(holder, disp, name, objective)]
+                guard = 'execute if score #rowchg dsb_ctl matches 1 run '
+                chosen.append(guard + 'scoreboard players operation {} {} = {} {}'.format(holder, disp, name, objective))
+                # ⚠ ensure_ascii=False：Brigadier 的 NBT 字符串不接受 \uXXXX 转义，
+                #   JSON 组件（display name）才接受。玩家名虽是 ASCII，统一按字面输出。
+                chosen.append(guard + 'data modify storage {}:render row set value {}'.format(
+                    DP_NAME, json.dumps({'name': name}, ensure_ascii=False, separators=(',', ':'))))
+                chosen.append(guard + 'function {}:render/row_{}{} with storage {}:render row'.format(DP_NAME, kind, rank, DP_NAME))
+                chosen.append(guard + 'scoreboard players set {} dsb_owner {}'.format(holder, player_id))
+                chosen.append(guard + 'scoreboard players operation {} dsb_value = {} {}'.format(holder, name, objective))
                 dp_write_file(rel + '.mcfunction', '\n'.join(chosen) + '\n')
+            # 该名次无人入选：占位行有残留分数则清掉（行消失，只在真掉榜时发一次包）
+            render.append('execute if score #picked dsb_ctl matches 0 if score {} {} matches {}.. '
+                          'run scoreboard players reset {} {}'.format(holder, disp, SCORE_MIN, holder, disp))
             # 显示名只放「名次 + 名字」（左对齐列）；数值在右侧分数列
             extra = []
             if cfg('show_rank_number'):
@@ -1527,23 +1557,31 @@ def _dp_write_boards(names: List[str], limit: int, both_limit: int):
             row = ['$scoreboard players display name {} {} {}'.format(holder, disp, _json_component({'text': '', 'extra': extra}))]
             dp_write_file('render/row_{}{}.mcfunction'.format(kind, rank), '\n'.join(row) + '\n')
         if total_on:
-            # 总和行：名字列放 label（左对齐），分数列放全服合计（右对齐）
-            render.append('scoreboard players operation {} {} = #total {}'.format(total_holder, disp, total_obj))
-            # 注意：没有宏变量就不要加 $ 前缀，否则函数加载报 "Macro without variables"
-            render.append('scoreboard players display name {} {} {}'.format(
-                total_holder, disp, _json_component({'text': str(spec['total_label']), 'color': cfg('title_color')})))
-            render.append('scoreboard players operation {} dsb_value = #total {}'.format(total_holder, total_obj))
+            # 总和行：名字列放 label（左对齐），分数列放全服合计（右对齐）。
+            # 合计没变就不重发（label 是常量，随分数一起判断即可）。
+            render.append('execute unless score {} {} = #total {} run scoreboard players operation {} {} = #total {}'.format(
+                total_holder, disp, total_obj, total_holder, disp, total_obj))
+            render.append('execute unless score {} {} = #total {} run scoreboard players display name {} {} {}'.format(
+                total_holder, disp, total_obj, total_holder, disp,
+                _json_component({'text': str(spec['total_label']), 'color': cfg('title_color')})))
+            render.append('execute unless score {} {} = #total {} run scoreboard players operation {} dsb_value = #total {}'.format(
+                total_holder, disp, total_obj, total_holder, total_obj))
         if blank_on:
             # 换行：总和行与排行榜之间的空行。
             # 分数列即数值，空行没有数值——取「第一名分数+1」排在总和行与第一名之间；
-            # 没有玩家入选时 guard 不成立，空行随开头的 reset 一起清掉（不显示）。
+            # 用 #blankv 暂存后再与现状比较，没变就不发；第一名空了则清掉空行。
             rank1_holder = prefix + 'r01'
+            r1 = 'execute if score {} {} matches {}..'.format(rank1_holder, disp, SCORE_MIN + 1)
             blank_row = [
-                'execute if score {} {} matches {}.. run scoreboard players operation {} {} = {} {}'.format(
-                    rank1_holder, disp, SCORE_MIN + 1, blank_holder, disp, rank1_holder, disp),
-                'execute if score {} {} matches {}.. run scoreboard players add {} {} 1'.format(
-                    rank1_holder, disp, SCORE_MIN + 1, blank_holder, disp),
-                'scoreboard players display name {} {} {}'.format(blank_holder, disp, _json_component({'text': ''})),
+                r1 + ' run scoreboard players operation #blankv dsb_ctl = {} {}'.format(rank1_holder, disp),
+                r1 + ' run scoreboard players add #blankv dsb_ctl 1',
+                r1 + ' unless score {} {} = #blankv dsb_ctl run scoreboard players operation {} {} = #blankv dsb_ctl'.format(
+                    blank_holder, disp, blank_holder, disp),
+                r1 + ' unless score {} {} = #blankv dsb_ctl run scoreboard players display name {} {} {}'.format(
+                    blank_holder, disp, blank_holder, disp, _json_component({'text': ''})),
+                'execute unless score {} {} matches {}.. if score {} {} matches {}.. '
+                'run scoreboard players reset {} {}'.format(
+                    rank1_holder, disp, SCORE_MIN + 1, blank_holder, disp, SCORE_MIN, blank_holder, disp),
             ]
             dp_write_file('render/blank_{}.mcfunction'.format(kind), '\n'.join(blank_row) + '\n')
             render.append('function {}:render/blank_{}'.format(DP_NAME, kind))
